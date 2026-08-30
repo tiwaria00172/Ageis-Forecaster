@@ -1,0 +1,253 @@
+# =============================================================================
+# Network Attack Forecasting — World Model Configuration
+# =============================================================================
+
+project:
+  name: "Network Attack Forecasting"
+  version: "1.0.0"
+  description: "AI-based network attack forecasting using temporal world models"
+
+# ---------------------------------------------------------------------------
+# Data Configuration
+# ---------------------------------------------------------------------------
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  sample_dir: "data/sample"
+  
+  # Supported dataset schemas and their column mappings
+  # The loader will try to auto-detect or use this mapping
+  column_mappings:
+    # CIC-IDS-2017/2018 style
+    cic_ids:
+      timestamp: "Timestamp"
+      src_ip: "Src IP"
+      dst_ip: "Dst IP"
+      src_port: "Src Port"
+      dst_port: "Dst Port"
+      protocol: "Protocol"
+      total_fwd_packets: "Total Fwd Packet"
+      total_bwd_packets: "Total Bwd packets"
+      total_length_fwd: "Total Length of Fwd Packet"
+      total_length_bwd: "Total Length of Bwd Packet"
+      flow_duration: "Flow Duration"
+      flow_bytes_per_sec: "Flow Bytes/s"
+      flow_packets_per_sec: "Flow Packets/s"
+      fwd_iat_mean: "Fwd IAT Mean"
+      bwd_iat_mean: "Bwd IAT Mean"
+      fwd_psh_flags: "Fwd PSH Flags"
+      syn_flag_count: "SYN Flag Count"
+      ack_flag_count: "ACK Flag Count"
+      fin_flag_count: "FIN Flag Count"
+      rst_flag_count: "RST Flag Count"
+      psh_flag_count: "PSH Flag Count"
+      urg_flag_count: "URG Flag Count"
+      label: "Label"
+
+    # CTU-13 style
+    ctu_13:
+      timestamp: "StartTime"
+      src_ip: "SrcAddr"
+      dst_ip: "DstAddr"
+      src_port: "Sport"
+      dst_port: "Dport"
+      protocol: "Proto"
+      total_bytes: "TotBytes"
+      total_packets: "TotPkts"
+      duration: "Dur"
+      label: "Label"
+
+    # Generic / fallback
+    generic:
+      timestamp: "timestamp"
+      src_ip: "src_ip"
+      dst_ip: "dst_ip"
+      src_port: "src_port"
+      dst_port: "dst_port"
+      protocol: "protocol"
+      total_bytes: "total_bytes"
+      total_packets: "total_packets"
+      duration: "duration"
+      label: "label"
+
+# ---------------------------------------------------------------------------
+# Feature Extraction
+# ---------------------------------------------------------------------------
+features:
+  # Flow-level features to extract/derive
+  flow_features:
+    - "total_bytes"
+    - "total_packets"
+    - "flow_duration"
+    - "bytes_per_packet"
+    - "packets_per_second"
+    - "bytes_per_second"
+    - "fwd_bwd_packet_ratio"
+    - "connection_frequency"
+    - "unique_dst_ports"
+    - "unique_dst_ips"
+
+  # TCP flag features
+  tcp_features:
+    - "syn_count"
+    - "ack_count"
+    - "fin_count"
+    - "rst_count"
+    - "psh_count"
+    - "urg_count"
+    - "syn_ratio"
+    - "ack_ratio"
+
+  # Temporal features
+  temporal_features:
+    - "iat_mean"
+    - "iat_variance"
+    - "iat_max"
+    - "packet_rate"
+    - "burstiness"
+
+  # Attack behaviour features
+  attack_features:
+    - "port_scan_score"
+    - "dst_port_diversity"
+    - "connection_attempt_rate"
+    - "syn_burst_score"
+    - "failed_connection_ratio"
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  scaler_type: "standard"  # "standard" or "robust"
+  handle_inf: true
+  handle_missing: true
+  missing_strategy: "median"  # "mean", "median", "zero"
+  max_categories: 20
+  test_size: 0.15
+  val_size: 0.15
+
+# ---------------------------------------------------------------------------
+# Time Windowing
+# ---------------------------------------------------------------------------
+windowing:
+  window_size_seconds: 10
+  sequence_length: 10
+  forecast_steps: 5
+  aggregation: "mean"  # "mean", "median", "sum", "max"
+  overlap_ratio: 0.0  # 0.0 = no overlap, 0.5 = 50% overlap
+  min_flows_per_window: 1
+
+# ---------------------------------------------------------------------------
+# World Model Architecture
+# ---------------------------------------------------------------------------
+model:
+  # Feature encoder
+  encoder_hidden_dims: [128, 64]
+  encoder_dropout: 0.2
+  
+  # GRU temporal model
+  gru_hidden_size: 128
+  gru_num_layers: 2
+  gru_dropout: 0.2
+  gru_bidirectional: false
+  
+  # Output heads
+  num_attack_stages: 6  # Normal, Recon, Initial Access, Lateral, C2, Exfil
+  
+  # Multi-task loss weights
+  alpha: 1.0   # State prediction loss weight
+  beta: 1.0    # Infiltration prediction loss weight
+  gamma: 1.0   # Attack stage prediction loss weight
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adam"  # "adam", "adamw"
+  scheduler: "cosine"  # "cosine", "step", "plateau"
+  scheduler_step_size: 20
+  scheduler_gamma: 0.5
+  early_stopping_patience: 15
+  min_delta: 0.0001
+  gradient_clip: 1.0
+  seed: 42
+  num_workers: 0
+  pin_memory: false
+  save_dir: "models/saved"
+  checkpoint_dir: "models/checkpoints"
+
+# ---------------------------------------------------------------------------
+# Forecasting
+# ---------------------------------------------------------------------------
+forecasting:
+  default_k_steps: 5
+  confidence_decay: 0.95  # Decay factor for confidence over forecast steps
+  risk_threshold_low: 0.3
+  risk_threshold_medium: 0.6
+  risk_threshold_high: 0.8
+
+# ---------------------------------------------------------------------------
+# Explainability
+# ---------------------------------------------------------------------------
+explainability:
+  method: "perturbation"  # "shap", "integrated_gradients", "perturbation"
+  num_perturbation_samples: 100
+  top_k_features: 10
+  baseline_type: "zero"  # "zero", "mean"
+
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK Mapping
+# ---------------------------------------------------------------------------
+mitre:
+  stages:
+    0: "Normal"
+    1: "Reconnaissance"
+    2: "Initial Access"
+    3: "Lateral Movement"
+    4: "Command and Control"
+    5: "Exfiltration"
+  
+  # Heuristic label mapping for common dataset labels
+  label_mapping:
+    # CIC-IDS labels
+    "BENIGN": 0
+    "benign": 0
+    "Normal": 0
+    "normal": 0
+    # Reconnaissance
+    "PortScan": 1
+    "Port Scan": 1
+    "FTP-Patator": 1
+    "SSH-Patator": 1
+    "Heartbleed": 1
+    "Infiltration": 2
+    "Web Attack": 2
+    "Web Attack – Brute Force": 2
+    "Web Attack – XSS": 2
+    "Web Attack – SQL Injection": 2
+    # DoS / DDoS - mapped to Initial Access
+    "DoS Hulk": 2
+    "DoS GoldenEye": 2
+    "DoS Slowloris": 2
+    "DoS slowhttptest": 2
+    "DDoS": 2
+    # Botnet - C2
+    "Bot": 4
+    "Botnet": 4
+    # CTU-13 labels
+    "Background": 0
+    "Botnet-V1": 4
+    "Botnet-V2": 4
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  console: true
+  file: true
