@@ -207,8 +207,8 @@ mitre:
     0: "Normal"
     1: "Reconnaissance"
     2: "Initial Access"
-    3: "Lateral Movement"
-    4: "Command and Control"
+    3: "Infiltration"
+    4: "Lateral Movement"
     5: "Exfiltration"
   
   # Heuristic label mapping for common dataset labels
@@ -224,24 +224,26 @@ mitre:
     "FTP-Patator": 1
     "SSH-Patator": 1
     "Heartbleed": 1
-    "Infiltration": 2
+    # Initial Access
     "Web Attack": 2
     "Web Attack – Brute Force": 2
-    "Web Attack – XSS": 2
-    "Web Attack – SQL Injection": 2
-    # DoS / DDoS - mapped to Initial Access
     "DoS Hulk": 2
     "DoS GoldenEye": 2
     "DoS Slowloris": 2
     "DoS slowhttptest": 2
     "DDoS": 2
-    # Botnet - C2
-    "Bot": 4
-    "Botnet": 4
+    # Infiltration
+    "Infiltration": 3
+    # Lateral Movement
+    "Web Attack – XSS": 4
+    "Web Attack – SQL Injection": 4
+    # Exfiltration
+    "Bot": 5
+    "Botnet": 5
     # CTU-13 labels
     "Background": 0
-    "Botnet-V1": 4
-    "Botnet-V2": 4
+    "Botnet-V1": 5
+    "Botnet-V2": 5
 
 # ---------------------------------------------------------------------------
 # Logging

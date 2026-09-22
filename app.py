@@ -60,6 +60,19 @@ def _load_model_and_align(X_seq, config):
 
     return model, X_seq, train_features, has_trained
 
+
+def get_sih_risk_level(infiltration_prob: float) -> str:
+    """Map infiltration probability to a risk label based on SIH thresholds (0-100% scale)."""
+    p_pct = infiltration_prob * 100.0
+    if p_pct <= 20.0:
+        return "LOW"
+    elif p_pct <= 50.0:
+        return "MODERATE"
+    elif p_pct <= 75.0:
+        return "HIGH"
+    else:
+        return "CRITICAL"
+
 # ---------------------------------------------------------------------------
 # Page config & CSS
 # ---------------------------------------------------------------------------
@@ -67,8 +80,7 @@ st.set_page_config(page_title="NetForecast AI", page_icon="🛡️", layout="wid
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-* { font-family: 'Inter', sans-serif; }
+* { font-family: Arial, Helvetica, sans-serif; }
 [data-testid="stAppViewContainer"] { background: linear-gradient(135deg, #0a0e1a 0%, #111827 50%, #0f172a 100%); color: #e2e8f0; }
 [data-testid="stSidebar"] { background: #0d1321; border-right: 1px solid #1e293b; }
 [data-testid="stHeader"] { background: transparent; }
@@ -91,7 +103,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 PLOT_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color="#e2e8f0", family="Inter"), margin=dict(l=40, r=20, t=40, b=40),
+    font=dict(color="#e2e8f0", family="Arial"), margin=dict(l=40, r=20, t=40, b=40),
     xaxis=dict(gridcolor="#1e293b", zerolinecolor="#334155"),
     yaxis=dict(gridcolor="#1e293b", zerolinecolor="#334155"),
 )
@@ -309,16 +321,16 @@ elif page == "🔮 Attack Forecast":
 
     st.info("ℹ️ Running world model inference for K-step forecast...")
 
-    # Try loading trained model, fall back to untrained for demo
+    # Load the trained World Model. Never present an untrained network as a prediction.
     try:
         from src.models.forecasting_engine import ForecastingEngine
 
         model, X_seq, train_features, has_trained = _load_model_and_align(X_seq, config)
-        if has_trained:
-            st.success("Trained model loaded.")
-        else:
-            st.warning("No trained model found. Using untrained model for demo. Train the model for real predictions.")
+        if not has_trained:
+            st.error("No trained World Model checkpoint found at models/saved/best_world_model.pt. Train the model before running forecast inference.")
+            st.stop()
 
+        st.success("Trained GRU World Model loaded successfully.")
         engine = ForecastingEngine(model, config)
         # Use the last available sequence for forecasting
         last_seq = X_seq[-1]  # (seq_len, D)
@@ -329,33 +341,38 @@ elif page == "🔮 Attack Forecast":
         steps = [f"T+{r.step}" for r in results]
         probs = [r.infiltration_prob * 100 for r in results]
         stages = [mapper.get_stage_name(r.attack_stage) for r in results]
-        confs = [r.confidence * 100 for r in results]
+        
+        # Calculate confidence using the decay factor configuration to be consistent with the progression tab
+        decay_factor = config.get("forecasting", {}).get("confidence_decay", 0.95)
+        confs = [max(0.0, min(100.0, (decay_factor ** r.step) * 100.0)) for r in results]
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=steps, y=probs, mode="lines+markers+text",
-            text=[f"{p:.0f}%" for p in probs], textposition="top center",
+            text=[f"{p:.1f}%" for p in probs], textposition="top center",
             textfont=dict(color="#e2e8f0", size=14),
             line=dict(color="#ef4444", width=3),
             marker=dict(size=12, color=[
-                "#22c55e" if p < 30 else "#eab308" if p < 60 else "#f97316" if p < 80 else "#ef4444"
+                "#22c55e" if p <= 20 else "#eab308" if p <= 50 else "#f97316" if p <= 75 else "#ef4444"
                 for p in probs
             ], line=dict(color="#fff", width=2)),
-            name="Infiltration Probability",
+            name="Attack Probability",
         ))
-        # Threshold lines
-        for thr, clr, lbl in [(30, "#22c55e", "Low"), (60, "#eab308", "Medium"), (80, "#ef4444", "High")]:
+        # Threshold lines matching the SIH risk levels
+        for thr, clr, lbl in [(20, "#22c55e", "Low"), (50, "#eab308", "Moderate"), (75, "#f97316", "High")]:
             fig.add_hline(y=thr, line_dash="dot", line_color=clr, opacity=0.4,
                           annotation_text=lbl, annotation_position="right")
-        fig.update_layout(**PLOT_LAYOUT, title="Infiltration Probability Forecast",
+        fig.update_layout(**PLOT_LAYOUT, title="Attack Probability Forecast",
                           yaxis_title="Probability (%)", yaxis_range=[0, 105], height=420)
         st.plotly_chart(fig, use_container_width=True)
 
         # Forecast table
         forecast_df = pd.DataFrame({
-            "Step": steps, "Infiltration %": [f"{p:.1f}%" for p in probs],
-            "Stage": stages, "Risk": [engine.get_risk_level(r.infiltration_prob) for r in results],
-            "Confidence": [f"{c:.0f}%" for c in confs],
+            "Forecast Step": steps,
+            "Predicted Stage": stages,
+            "Attack Probability": [f"{p:.1f}%" for p in probs],
+            "Risk Level": [engine.get_risk_level(r.infiltration_prob) for r in results],
+            "Model Confidence": [f"{c:.0f}%" for c in confs],
         })
         st.dataframe(forecast_df, use_container_width=True, hide_index=True)
 
@@ -380,33 +397,71 @@ elif page == "⚔️ Attack Progression":
     current_stage = int(l_atk[-1]) if len(l_atk) > 0 else 0
     current_info = mapper.get_stage_info(current_stage)
 
-    st.markdown(f"### Current Observed State: {current_info['icon']} **{current_info['name']}**")
-    st.markdown(f"*{current_info['description']}*")
+    st.markdown("### 🔍 Current Observed State")
+    if current_stage == 0:
+        st.markdown(f"**NORMAL** 🟢")
+        st.markdown("*No confirmed compromise currently detected.*")
+    else:
+        st.markdown(f"**{current_info['name'].upper()}** {current_info['icon']}")
+        st.markdown(f"*{current_info['description']}*")
     st.markdown("---")
 
     if results:
         st.markdown("### Predicted Attack Progression")
         # Build progression: current → forecasted stages
         all_stages = [current_stage] + [r.attack_stage for r in results]
-        all_labels = ["Current (Observed)"] + [f"T+{r.step} (Forecast)" for r in results]
+        all_labels = ["Current (Observed)"] + [f"T+{r.step} Forecast" for r in results]
         all_probs = [0] + [r.infiltration_prob for r in results]
 
         cols = st.columns(len(all_stages))
         for i, (stage_id, label, prob) in enumerate(zip(all_stages, all_labels, all_probs)):
             info = mapper.get_stage_info(stage_id)
             with cols[i]:
-                border = "2px solid #0ea5e9" if i == 0 else f"2px solid {info['color']}"
-                badge = "OBSERVED" if i == 0 else "FORECAST"
-                badge_clr = "#0ea5e9" if i == 0 else info["color"]
-                st.markdown(f"""
-                <div style="background:#1e293b; border:{border}; border-radius:12px; padding:16px; text-align:center; min-height:200px;">
-                    <span style="background:{badge_clr}; color:#fff; padding:2px 10px; border-radius:10px; font-size:0.7rem;">{badge}</span>
-                    <div style="font-size:2.5rem; margin:12px 0;">{info['icon']}</div>
-                    <div style="font-weight:600; font-size:0.95rem; color:#f1f5f9;">{info['name']}</div>
-                    <div style="color:#94a3b8; font-size:0.75rem; margin-top:4px;">{label}</div>
-                    {"<div style='color:#ef4444; font-weight:600; margin-top:8px;'>" + f"{prob:.0%} risk" + "</div>" if i > 0 else ""}
-                </div>
-                """, unsafe_allow_html=True)
+                if i == 0:
+                    border = "2px solid #0ea5e9"
+                    badge_clr = "#0ea5e9"
+                    badge = "OBSERVED"
+                    st.markdown(f"""<div style="background:#1e293b; border:{border}; border-radius:12px; padding:16px; text-align:center; min-height:220px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+<span style="background:{badge_clr}; color:#fff; padding:2px 10px; border-radius:10px; font-size:0.7rem; font-weight:600; text-transform:uppercase;">{badge}</span>
+<div style="font-size:2.5rem; margin:12px 0;">{info['icon']}</div>
+<div style="font-weight:700; font-size:1.1rem; color:#f1f5f9; text-transform:uppercase;">{info['name']}</div>
+<div style="color:#94a3b8; font-size:0.8rem; margin-top:8px; font-weight:500;">{label}</div>
+</div>""", unsafe_allow_html=True)
+                else:
+                    r = results[i-1]
+                    border = f"2px solid {info['color']}"
+                    badge_clr = info["color"]
+                    badge = "FORECAST"
+                    risk_lvl = get_sih_risk_level(r.infiltration_prob)
+                    
+                    # Risk level color matching
+                    risk_colors = {
+                        "LOW": "#22c55e",
+                        "MODERATE": "#eab308",
+                        "HIGH": "#f97316",
+                        "CRITICAL": "#ef4444"
+                    }
+                    risk_clr = risk_colors.get(risk_lvl, "#94a3b8")
+                    
+                    # Confidence decay calculation
+                    decay_factor = config.get("forecasting", {}).get("confidence_decay", 0.95)
+                    decayed_conf = (decay_factor ** r.step) * 100.0
+                    decayed_conf = max(0.0, min(100.0, decayed_conf))
+                    
+                    st.markdown(f"""<div style="background:#1e293b; border:{border}; border-radius:12px; padding:16px; text-align:center; min-height:220px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+<span style="background:{badge_clr}; color:#fff; padding:2px 10px; border-radius:10px; font-size:0.7rem; font-weight:600; text-transform:uppercase;">{badge}</span>
+<div style="font-size:2.5rem; margin:12px 0;">{info['icon']}</div>
+<div style="font-weight:700; font-size:1.1rem; color:#f1f5f9; text-transform:uppercase;">{info['name']}</div>
+<div style="color:#94a3b8; font-size:0.8rem; margin-top:4px; font-weight:500; margin-bottom:12px;">{label}</div>
+<div style="border-top:1px solid #334155; padding-top:8px; margin-top:8px; text-align:left;">
+<div style="color:#94a3b8; font-size:0.75rem;">Attack Probability:</div>
+<div style="color:#f1f5f9; font-weight:600; font-size:0.95rem;">{r.infiltration_prob:.1%}</div>
+<div style="color:#94a3b8; font-size:0.75rem; margin-top:6px;">Risk Level:</div>
+<div style="color:{risk_clr}; font-weight:700; font-size:0.95rem; text-transform:uppercase;">{risk_lvl}</div>
+<div style="color:#94a3b8; font-size:0.75rem; margin-top:6px;">Confidence:</div>
+<div style="color:#94a3b8; font-weight:500; font-size:0.9rem;">{decayed_conf:.0f}%</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
         # Progression arrow timeline
         st.markdown("---")
@@ -440,19 +495,26 @@ elif page == "🧠 Explainability":
     X_seq = st.session_state.X_seq
     feature_cols = st.session_state.feature_cols
 
-    st.info("Computing feature importance via perturbation analysis...")
+    st.info("Computing feature attribution via perturbation analysis...")
 
     try:
         from src.explainability.explainer import Explainer
 
         model, X_seq, train_features, has_trained = _load_model_and_align(X_seq, config)
-        # Use training feature names for explainability if available
+        if not has_trained:
+            st.error("No trained World Model checkpoint found. Train the model before generating explanations.")
+            st.stop()
         if train_features:
             feature_cols = train_features
 
+        # Get forecasted stage (at T+1)
+        forecast_results = st.session_state.get("forecast_results", [])
+        pred_stage_id = forecast_results[0].attack_stage if forecast_results else 0
+        mapper = MitreMapper(config)
+
         explainer = Explainer(model, feature_cols, config)
         last_seq = X_seq[-1]
-        explanation = explainer.explain(last_seq)
+        explanation = explainer.explain(last_seq, predicted_stage=pred_stage_id)
         st.session_state.explain_results = explanation
 
         st.markdown("### Top Risk-Driving Features")
@@ -465,7 +527,7 @@ elif page == "🧠 Explainability":
 
         fig = go.Figure(go.Bar(
             x=feat_vals, y=feat_names, orientation="h",
-            marker_color=colors, text=[f"{v:+.3f}" for v in feat_vals],
+            marker_color=colors, text=[f"{v:+.2e}" for v in feat_vals],
             textposition="outside", textfont=dict(color="#e2e8f0"),
         ))
         fig.update_layout(**PLOT_LAYOUT, title="Feature Importance (Infiltration Risk)",
@@ -473,17 +535,37 @@ elif page == "🧠 Explainability":
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Detailed table
+        # Detailed table with dynamic label for top driver and top mitigator
+        pred_stage_name = mapper.get_stage_name(pred_stage_id).upper()
+        directions = []
+        
+        # Find index of the first positive value (top risk driver)
+        first_pos_idx = next((i for i, v in enumerate(feat_vals) if v > 0), -1)
+        # Find index of the first negative value (top risk mitigator)
+        first_neg_idx = next((i for i, v in enumerate(feat_vals) if v < 0), -1)
+        
+        for idx, v in enumerate(feat_vals):
+            if v > 0:
+                if idx == first_pos_idx:
+                    directions.append(f"🔥 Top Driver for {pred_stage_name} (↑ Increased Risk)")
+                else:
+                    directions.append("↑ Increased Risk")
+            else:
+                if idx == first_neg_idx:
+                    directions.append(f"🛡️ Top Mitigator for {pred_stage_name} (↓ Reduced Risk)")
+                else:
+                    directions.append("↓ Reduced Risk")
+
         imp_df = pd.DataFrame({
-            "Feature": feat_names, "Importance": [f"{v:+.4f}" for v in feat_vals],
-            "Direction": ["↑ Increased Risk" if v > 0 else "↓ Reduced Risk" for v in feat_vals],
+            "Feature": feat_names, "Importance": [f"{v:+.2e}" for v in feat_vals],
+            "Direction": directions,
         })
         st.dataframe(imp_df, use_container_width=True, hide_index=True)
 
         # Narrative
         st.markdown("### AI Explanation")
         st.markdown(f"*{explanation['narrative']}*")
-        st.caption(f"Method: {explanation['method']} | Top {len(top)} features shown")
+        st.caption(f"Method: {explanation['method']} | Top {len(top)} features shown | Attribution values are relative perturbation effects, not probabilities")
 
     except Exception as e:
         st.error(f"Explainability error: {e}")
@@ -508,27 +590,33 @@ elif page == "🚩 Flagged Behaviour":
         st.info("No suspicious flows detected in the dataset.")
         st.stop()
 
+    # Build a clean display table.
+    # IMPORTANT: attack_stage is the observed/ground-truth stage stored in the
+    # uploaded dataset. It is NOT a per-flow model prediction.
     display_cols = []
-    for col in ["timestamp", "src_ip", "dst_ip", "dst_port", "protocol", "attack_stage", "label"]:
+    for col in ["timestamp", "src_ip", "dst_ip", "dst_port", "protocol", "label"]:
         if col in flagged.columns:
             display_cols.append(col)
 
     flagged_display = flagged[display_cols].copy()
-    if "attack_stage" in flagged_display.columns:
-        flagged_display["Predicted Stage"] = flagged_display["attack_stage"].map(
+
+    # Show the dataset's attack stage with an explicit name so the dashboard
+    # does not incorrectly claim that these values came from model inference.
+    if "attack_stage" in flagged.columns:
+        flagged_display["Observed Stage"] = flagged["attack_stage"].map(
             lambda x: mapper.get_stage_name(int(x))
         )
 
     # Filters
     col1, col2 = st.columns(2)
     with col1:
-        if "Predicted Stage" in flagged_display.columns:
+        if "Observed Stage" in flagged_display.columns:
             stage_filter = st.multiselect(
-                "Filter by Stage",
-                options=flagged_display["Predicted Stage"].unique().tolist(),
-                default=flagged_display["Predicted Stage"].unique().tolist(),
+                "Filter by Observed Stage",
+                options=flagged_display["Observed Stage"].dropna().unique().tolist(),
+                default=flagged_display["Observed Stage"].dropna().unique().tolist(),
             )
-            flagged_display = flagged_display[flagged_display["Predicted Stage"].isin(stage_filter)]
+            flagged_display = flagged_display[flagged_display["Observed Stage"].isin(stage_filter)]
     with col2:
         if "protocol" in flagged_display.columns:
             proto_filter = st.multiselect(
@@ -537,6 +625,11 @@ elif page == "🚩 Flagged Behaviour":
                 default=flagged_display["protocol"].unique().tolist(),
             )
             flagged_display = flagged_display[flagged_display["protocol"].isin(proto_filter)]
+
+    st.caption(
+        "Observed Stage is derived from the attack_stage label in the uploaded dataset. "
+        "Model-generated future stages are shown in the Attack Forecast and Attack Progression pages."
+    )
 
     st.metric("Flagged Flows", f"{len(flagged_display):,}")
     st.dataframe(flagged_display.head(500), use_container_width=True, hide_index=True)

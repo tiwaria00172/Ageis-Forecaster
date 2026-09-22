@@ -67,6 +67,21 @@ ATTACK_STAGES = {
         ],
     },
     3: {
+        "name": "Infiltration",
+        "mitre_id": "TA0009",
+        "description": (
+            "Adversary has successfully bypassed initial defenses and established a foothold, "
+            "gaining unauthorized access to critical hosts or services."
+        ),
+        "color": "#e74c3c",
+        "icon": "🔴",
+        "indicators": [
+            "Unusual file creation or process execution",
+            "Repeated attempts to access sensitive objects",
+            "Elevated command execution frequency",
+        ],
+    },
+    4: {
         "name": "Lateral Movement",
         "mitre_id": "TA0008",
         "description": (
@@ -74,30 +89,13 @@ ATTACK_STAGES = {
             "Indicators include internal scanning, credential reuse, and "
             "SMB/RDP traffic spikes."
         ),
-        "color": "#e74c3c",
-        "icon": "🔴",
+        "color": "#9b59b6",
+        "icon": "🟣",
         "indicators": [
             "Internal-to-internal scanning",
             "Multiple destination IPs from single source",
             "Unusual internal port access",
             "SMB/RDP traffic anomalies",
-        ],
-    },
-    4: {
-        "name": "Command and Control",
-        "mitre_id": "TA0011",
-        "description": (
-            "Adversary has established communication with compromised hosts. "
-            "Indicators include beaconing patterns, DNS tunnelling, and "
-            "encrypted traffic to unknown destinations."
-        ),
-        "color": "#9b59b6",
-        "icon": "🟣",
-        "indicators": [
-            "Regular beaconing intervals",
-            "DNS query anomalies",
-            "Encrypted traffic to rare destinations",
-            "Persistent outbound connections",
         ],
     },
     5: {
@@ -206,14 +204,16 @@ class MitreMapper:
         return narrative
 
     def _risk_label(self, prob: float) -> str:
-        """Map probability to a risk label string."""
-        if prob >= 0.8:
-            return "🔴 CRITICAL"
-        elif prob >= 0.6:
+        """Map probability to a risk label string based on SIH thresholds."""
+        p_pct = prob * 100.0
+        if p_pct <= 20.0:
+            return "🟢 LOW"
+        elif p_pct <= 50.0:
+            return "🟡 MODERATE"
+        elif p_pct <= 75.0:
             return "🟠 HIGH"
-        elif prob >= 0.3:
-            return "🟡 MEDIUM"
-        return "🟢 LOW"
+        else:
+            return "🔴 CRITICAL"
 
     def get_progression_path(
         self, forecast_stages: List[int]

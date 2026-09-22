@@ -172,20 +172,17 @@ class Explainer:
     # ------------------------------------------------------------------
 
     def explain(
-        self, sequence: np.ndarray
+        self, sequence: np.ndarray, predicted_stage: int = 0
     ) -> Dict[str, Any]:
         """
         Explain a prediction using the configured method.
 
         Args:
             sequence: (seq_len, D) observed state sequence.
+            predicted_stage: The forecasted stage ID.
 
         Returns:
-            Dictionary with:
-              - method: name of the explanation method
-              - feature_importances: list of (name, score) tuples
-              - top_features: top-K features
-              - narrative: template-based text explanation
+            Dictionary with explanation details and dynamic narrative.
         """
         try:
             if self.method == "integrated_gradients":
@@ -201,7 +198,7 @@ class Explainer:
         top = importances[: self.top_k]
 
         # Generate template-based narrative
-        narrative = self._generate_narrative(top)
+        narrative = self._generate_narrative(top, predicted_stage)
 
         return {
             "method": self.method,
@@ -211,41 +208,73 @@ class Explainer:
         }
 
     def _generate_narrative(
-        self, top_features: List[Tuple[str, float]]
+        self, top_features: List[Tuple[str, float]], predicted_stage: int = 0
     ) -> str:
         """
-        Generate a human-readable explanation from feature importances.
-        No external LLM required.
+        Generate a human-readable explanation from feature importances,
+        tailored dynamically to the forecasted attack stage.
         """
         if not top_features:
             return "Insufficient data for explanation."
 
+        stage_names = {
+            0: "Normal",
+            1: "Reconnaissance",
+            2: "Initial Access",
+            3: "Infiltration",
+            4: "Lateral Movement",
+            5: "Exfiltration"
+        }
+        
+        stage_name = stage_names.get(predicted_stage, "Attack Progression")
+        
         risk_drivers = [f for f in top_features if f[1] > 0]
         risk_reducers = [f for f in top_features if f[1] < 0]
 
         parts = []
+        
+        # Tailor introduction to predicted stage
+        if predicted_stage > 0:
+            parts.append(
+                f"The model forecasts a transition to the **{stage_name}** stage."
+            )
+        else:
+            parts.append(
+                "The model forecasts that the network will remain in a **Normal** state."
+            )
+
         if risk_drivers:
             driver_names = [
                 self._humanise_feature(f[0]) for f in risk_drivers[:3]
             ]
-            parts.append(
-                "Elevated infiltration risk is primarily associated with "
-                + ", ".join(driver_names[:-1])
-                + (f", and {driver_names[-1]}" if len(driver_names) > 1 else driver_names[0])
-                + "."
-            )
+            drivers_str = ", ".join(driver_names[:-1])
+            if len(driver_names) > 1:
+                drivers_str += f", and {driver_names[-1]}"
+            else:
+                drivers_str = driver_names[0]
+                
+            if predicted_stage > 0:
+                parts.append(
+                    f"This forecasted progression toward {stage_name} is primarily driven by "
+                    f"**{drivers_str}**, indicating active threat indicators."
+                )
+            else:
+                parts.append(
+                    f"Normal operation features are active, but warning signs of potential future shifts are minimal. "
+                    f"The highest potential risk drivers are: **{drivers_str}**."
+                )
 
         if risk_reducers:
             reducer_names = [
                 self._humanise_feature(f[0]) for f in risk_reducers[:2]
             ]
             parts.append(
-                "Risk is partially mitigated by "
+                "Risk levels are mitigated or kept stable by "
                 + " and ".join(reducer_names)
                 + "."
             )
 
-        return " ".join(parts) if parts else "No significant risk drivers identified."
+        return " ".join(parts)
 
     @staticmethod
     def _humanise_feature(name: str) -> str:

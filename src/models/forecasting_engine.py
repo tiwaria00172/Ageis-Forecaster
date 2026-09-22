@@ -75,8 +75,8 @@ class ForecastingEngine:
         0: "Normal",
         1: "Reconnaissance",
         2: "Initial Access",
-        3: "Lateral Movement",
-        4: "Command and Control",
+        3: "Infiltration",
+        4: "Lateral Movement",
         5: "Exfiltration",
     }
 
@@ -149,10 +149,17 @@ class ForecastingEngine:
             pred_state = next_state.squeeze(0).cpu().numpy()          # (D,)
             infil_prob = float(infiltration.squeeze().cpu().item())
             stage_probs = torch.softmax(stage_logits, dim=-1).squeeze(0).cpu().numpy()
-            pred_stage = int(np.argmax(stage_probs))
+            # Use:
+            # predicted_stage = class_with_highest_probability
+            # confidence = highest_class_probability
+            # To ensure logical consistency: if infiltration probability is high (> 0.5) OR the argmax class is an attack,
+            # we choose the attack class (1 to 5) with the highest probability.
+            if infil_prob > 0.5 or np.argmax(stage_probs) > 0:
+                pred_stage = int(np.argmax(stage_probs[1:]) + 1)
+            else:
+                pred_stage = 0
 
-            # Apply confidence decay for compounding prediction error
-            confidence *= self.confidence_decay
+            confidence = float(stage_probs[pred_stage])
 
             results.append(ForecastResult(
                 step=step,
@@ -200,7 +207,11 @@ class ForecastingEngine:
         pred_state = next_state.squeeze(0).cpu().numpy()
         infil_prob = float(infiltration.squeeze().cpu().item())
         stage_probs = torch.softmax(stage_logits, dim=-1).squeeze(0).cpu().numpy()
-        pred_stage = int(np.argmax(stage_probs))
+        
+        if infil_prob > 0.5 or np.argmax(stage_probs) > 0:
+            pred_stage = int(np.argmax(stage_probs[1:]) + 1)
+        else:
+            pred_stage = 0
 
         return pred_state, infil_prob, pred_stage, stage_probs
 
@@ -223,12 +234,13 @@ class ForecastingEngine:
         return "\n".join(lines)
 
     def get_risk_level(self, infiltration_prob: float) -> str:
-        """Map infiltration probability to a risk label."""
-        fc = self.config.get("forecasting", {})
-        if infiltration_prob >= fc.get("risk_threshold_high", 0.8):
-            return "CRITICAL"
-        elif infiltration_prob >= fc.get("risk_threshold_medium", 0.6):
+        """Map infiltration probability to a risk label based on SIH thresholds."""
+        p_pct = infiltration_prob * 100.0
+        if p_pct <= 20.0:
+            return "LOW"
+        elif p_pct <= 50.0:
+            return "MODERATE"
+        elif p_pct <= 75.0:
             return "HIGH"
-        elif infiltration_prob >= fc.get("risk_threshold_low", 0.3):
-            return "MEDIUM"
-        return "LOW"
+        else:
+            return "CRITICAL"

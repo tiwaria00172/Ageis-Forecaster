@@ -1,129 +1,284 @@
 # =============================================================================
-# Metrics — Evaluation metrics for the world model and baseline
+# Metrics utilities
 # =============================================================================
-"""
-Provides classification and regression metrics used during training,
-evaluation, and baseline comparison.
-"""
-
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    mean_absolute_error,
-    mean_squared_error,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 
 
-def regression_metrics(
-    y_true: np.ndarray, y_pred: np.ndarray
-) -> Dict[str, float]:
+# =============================================================================
+# Regression metrics
+# =============================================================================
+
+def regression_metrics(y_true, y_pred):
     """
-    Compute regression metrics for state prediction evaluation.
-
-    Args:
-        y_true: Ground truth state vectors (N, D).
-        y_pred: Predicted state vectors (N, D).
-
-    Returns:
-        Dictionary with MSE, MAE, and per-feature RMSE.
+    Calculate regression metrics for next-state prediction.
     """
-    mse = mean_squared_error(y_true, y_pred)
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = float(np.sqrt(mse))
 
-    return {"mse": float(mse), "mae": float(mae), "rmse": rmse}
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
 
+    mse = float(np.mean((y_true - y_pred) ** 2))
+    mae = float(np.mean(np.abs(y_true - y_pred)))
 
-def binary_classification_metrics(
-    y_true: np.ndarray,
-    y_pred_proba: np.ndarray,
-    threshold: float = 0.5,
-) -> Dict[str, float]:
-    """
-    Compute binary classification metrics for infiltration prediction.
+    # R2 score
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true, axis=0)) ** 2)
 
-    Args:
-        y_true: Ground truth binary labels (N,).
-        y_pred_proba: Predicted probabilities (N,).
-        threshold: Classification threshold.
-
-    Returns:
-        Dictionary with accuracy, precision, recall, F1, AUC, and FPR.
-    """
-    y_pred = (y_pred_proba >= threshold).astype(int)
-
-    # Guard against single-class splits
-    unique_true = np.unique(y_true)
-    if len(unique_true) < 2:
-        auc = float("nan")
+    if ss_tot == 0:
+        r2 = 0.0
     else:
-        try:
-            auc = roc_auc_score(y_true, y_pred_proba)
-        except ValueError:
-            auc = float("nan")
-
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-    acc = accuracy_score(y_true, y_pred)
-
-    # False Positive Rate
-    tn_fp = np.sum(y_true == 0)
-    fp = np.sum((y_pred == 1) & (y_true == 0))
-    fpr = float(fp / tn_fp) if tn_fp > 0 else 0.0
+        r2 = float(1.0 - (ss_res / ss_tot))
 
     return {
-        "accuracy": float(acc),
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1_score": float(f1),
-        "auc_roc": float(auc),
-        "false_positive_rate": float(fpr),
+        "mse": mse,
+        "mae": mae,
+        "r2": r2,
     }
 
 
-def multiclass_classification_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    class_names: Optional[List[str]] = None,
-) -> Dict[str, object]:
+# =============================================================================
+# Binary classification metrics
+# =============================================================================
+
+def binary_classification_metrics(y_true, y_score, threshold=0.5):
     """
-    Compute multi-class metrics for attack stage prediction.
+    Calculate binary classification metrics.
 
     Args:
-        y_true: Ground truth stage labels (N,).
-        y_pred: Predicted stage labels (N,).
-        class_names: Optional list of stage names.
+        y_true: Ground-truth binary labels.
+        y_score: Predicted attack probabilities.
+        threshold: Probability threshold for converting scores to labels.
 
     Returns:
-        Dictionary with accuracy, macro F1, per-class report, and
-        confusion matrix.
+        Dictionary containing F1, precision, recall, accuracy,
+        AUC-ROC and false-positive rate.
     """
-    acc = accuracy_score(y_true, y_pred)
-    macro_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    weighted_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
-    report = classification_report(
-        y_true,
-        y_pred,
-        target_names=class_names,
-        zero_division=0,
-        output_dict=True,
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    y_score = np.asarray(y_score, dtype=float).reshape(-1)
+
+    y_pred = (y_score >= threshold).astype(int)
+
+    tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+    tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+    fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+    fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+    precision = (
+        tp / (tp + fp)
+        if (tp + fp) > 0
+        else 0.0
     )
-    cm = confusion_matrix(y_true, y_pred).tolist()
+
+    recall = (
+        tp / (tp + fn)
+        if (tp + fn) > 0
+        else 0.0
+    )
+
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+
+    accuracy = (
+        (tp + tn) / (tp + tn + fp + fn)
+        if (tp + tn + fp + fn) > 0
+        else 0.0
+    )
+
+    false_positive_rate = (
+        fp / (fp + tn)
+        if (fp + tn) > 0
+        else 0.0
+    )
+
+    # -------------------------------------------------------------------------
+    # AUC-ROC
+    # -------------------------------------------------------------------------
+    auc_roc = _binary_auc(y_true, y_score)
 
     return {
-        "accuracy": float(acc),
-        "macro_f1": float(macro_f1),
-        "weighted_f1": float(weighted_f1),
-        "classification_report": report,
-        "confusion_matrix": cm,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "auc_roc": auc_roc,
+        "false_positive_rate": false_positive_rate,
+        "true_positive": tp,
+        "true_negative": tn,
+        "false_positive": fp,
+        "false_negative": fn,
+    }
+
+
+def _binary_auc(y_true, y_score):
+    """
+    Calculate binary ROC-AUC using rank statistics.
+
+    Returns 0.5 when AUC cannot be calculated because only one
+    class is present.
+    """
+
+    y_true = np.asarray(y_true).astype(int)
+    y_score = np.asarray(y_score, dtype=float)
+
+    positives = y_true == 1
+    negatives = y_true == 0
+
+    n_pos = int(np.sum(positives))
+    n_neg = int(np.sum(negatives))
+
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+
+    # Sort scores and assign ranks.
+    order = np.argsort(y_score)
+    sorted_scores = y_score[order]
+
+    ranks = np.empty(len(y_score), dtype=float)
+
+    # Handle tied scores by assigning the average rank.
+    i = 0
+
+    while i < len(sorted_scores):
+        j = i + 1
+
+        while (
+            j < len(sorted_scores)
+            and sorted_scores[j] == sorted_scores[i]
+        ):
+            j += 1
+
+        average_rank = (i + 1 + j) / 2.0
+        ranks[order[i:j]] = average_rank
+
+        i = j
+
+    positive_rank_sum = np.sum(ranks[positives])
+
+    auc = (
+        positive_rank_sum
+        - n_pos * (n_pos + 1) / 2
+    ) / (n_pos * n_neg)
+
+    return float(auc)
+
+
+# =============================================================================
+# Multiclass classification metrics
+# =============================================================================
+
+def multiclass_classification_metrics(
+    y_true,
+    y_pred,
+    class_names=None,
+):
+    """
+    Calculate metrics for multi-class attack-stage prediction.
+    """
+
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    y_pred = np.asarray(y_pred).astype(int).reshape(-1)
+
+    if len(y_true) == 0:
+        return {
+            "accuracy": 0.0,
+            "macro_f1": 0.0,
+            "macro_precision": 0.0,
+            "macro_recall": 0.0,
+        }
+
+    classes = sorted(
+        set(y_true.tolist()) |
+        set(y_pred.tolist())
+    )
+
+    accuracy = float(
+        np.mean(y_true == y_pred)
+    )
+
+    precision_values = []
+    recall_values = []
+    f1_values = []
+
+    per_class = {}
+
+    for idx, cls in enumerate(classes):
+
+        tp = int(
+            np.sum(
+                (y_true == cls) &
+                (y_pred == cls)
+            )
+        )
+
+        fp = int(
+            np.sum(
+                (y_true != cls) &
+                (y_pred == cls)
+            )
+        )
+
+        fn = int(
+            np.sum(
+                (y_true == cls) &
+                (y_pred != cls)
+            )
+        )
+
+        precision = (
+            tp / (tp + fp)
+            if (tp + fp) > 0
+            else 0.0
+        )
+
+        recall = (
+            tp / (tp + fn)
+            if (tp + fn) > 0
+            else 0.0
+        )
+
+        f1 = (
+            2 * precision * recall /
+            (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+
+        precision_values.append(precision)
+        recall_values.append(recall)
+        f1_values.append(f1)
+
+        if class_names is not None and idx < len(class_names):
+            class_name = class_names[idx]
+        else:
+            class_name = f"Stage {cls}"
+
+        per_class[class_name] = {
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1_score": float(f1),
+            "support": int(np.sum(y_true == cls)),
+        }
+
+    macro_precision = float(
+        np.mean(precision_values)
+    )
+
+    macro_recall = float(
+        np.mean(recall_values)
+    )
+
+    macro_f1 = float(
+        np.mean(f1_values)
+    )
+
+    return {
+        "accuracy": accuracy,
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+        "macro_f1": macro_f1,
+        "per_class": per_class,
     }

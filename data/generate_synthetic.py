@@ -1,276 +1,1619 @@
-# =============================================================================
-# Synthetic Data Generator — Demo data for testing the pipeline
-# =============================================================================
 """
-Generates synthetic network traffic data that simulates a multi-stage
-attack progressing over time.  This data is for DEMONSTRATION AND
-TESTING ONLY — it should never be presented as real benchmark results.
+Synthetic Network Traffic Generator
+------------------------------------
 
-The generator creates a realistic time-ordered CSV with interleaved
-benign and malicious traffic, where attack stages progress
-chronologically to test the temporal world model's ability to learn
-state transitions.
+Generates chronological synthetic network traffic for the
+Network Attack Forecasting World Model.
 
-LABEL: Synthetic Demo Data
+IMPORTANT:
+- This is synthetic data for development/demo/testing.
+- It is NOT real network telemetry.
+- Multiple attack campaigns are distributed across the timeline.
+- Temporal ordering is preserved.
+- Each campaign progresses through:
+    Normal
+    -> Reconnaissance
+    -> Initial Access
+    -> Lateral Movement
+    -> Command & Control
+    -> Exfiltration
+
+Output contains:
+- CIC-IDS-style flow features
+- attack_stage
+- is_attack
+- Label
+
+MITRE-style stage mapping:
+    0 = Normal
+    1 = Reconnaissance
+    2 = Initial Access
+    3 = Lateral Movement
+    4 = Command & Control
+    5 = Exfiltration
 """
 
-import os
+from __future__ import annotations
+
 import argparse
-import sys
-from datetime import datetime, timedelta
-from typing import Optional
+import logging
+import random
+from pathlib import Path
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 
-# Ensure project root on sys.path
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------
+# Stage definitions
+# ---------------------------------------------------------------------
+
+STAGE_NAMES = {
+    0: "Normal",
+    1: "Reconnaissance",
+    2: "Initial Access",
+    3: "Lateral Movement",
+    4: "Command & Control",
+    5: "Exfiltration",
+}
+
+
+# ---------------------------------------------------------------------
+# Attack labels used by the project
+# ---------------------------------------------------------------------
+
+STAGE_LABELS = {
+    0: ["BENIGN"],
+    1: [
+        "PortScan",
+        "SSH-Patator",
+    ],
+    2: [
+        "Web Attack – Brute Force",
+        "Infiltration",
+        "DoS Hulk",
+    ],
+    3: [
+        "Infiltration",
+        "Web Attack – XSS",
+    ],
+    4: [
+        "Bot",
+    ],
+    5: [
+        "Bot",
+        "Infiltration",
+    ],
+}
+
+
+# ---------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------
+
+def clipped_normal(
+    rng: np.random.Generator,
+    mean: float,
+    std: float,
+    low: float,
+    high: float,
+) -> float:
+    """Generate a clipped normally distributed value."""
+    return float(np.clip(rng.normal(mean, std), low, high))
+
+
+def random_ip(rng: np.random.Generator, internal: bool = False) -> str:
+    """Generate a synthetic IPv4 address."""
+    if internal:
+        return (
+            f"10."
+            f"{rng.integers(0, 256)}."
+            f"{rng.integers(0, 256)}."
+            f"{rng.integers(1, 255)}"
+        )
+
+    return (
+        f"{rng.integers(1, 223)}."
+        f"{rng.integers(0, 256)}."
+        f"{rng.integers(0, 256)}."
+        f"{rng.integers(1, 255)}"
+    )
+
+
+def choose_protocol(
+    rng: np.random.Generator,
+    stage: int,
+) -> str:
+    """Choose a protocol based on attack stage."""
+
+    if stage == 1:
+        return str(rng.choice(["TCP", "UDP"]))
+
+    if stage == 2:
+        return str(rng.choice(["TCP", "TCP", "HTTP", "HTTPS"]))
+
+    if stage == 3:
+        return str(rng.choice(["TCP", "TCP", "SMB", "SSH"]))
+
+    if stage == 4:
+        return str(rng.choice(["TCP", "TCP", "UDP"]))
+
+    if stage == 5:
+        return str(rng.choice(["TCP", "TCP", "UDP"]))
+
+    return str(rng.choice(["TCP", "TCP", "UDP", "ICMP"]))
+
+
+def choose_port(
+    rng: np.random.Generator,
+    stage: int,
+) -> int:
+    """Choose destination port based on attack stage."""
+
+    if stage == 1:
+        return int(
+            rng.choice(
+                [
+                    21,
+                    22,
+                    23,
+                    25,
+                    53,
+                    80,
+                    110,
+                    135,
+                    139,
+                    143,
+                    443,
+                    445,
+                    3389,
+                    rng.integers(1, 65535),
+                ]
+            )
+        )
+
+    if stage == 2:
+        return int(rng.choice([80, 443, 8080, 8000]))
+
+    if stage == 3:
+        return int(rng.choice([22, 135, 139, 445, 3389]))
+
+    if stage == 4:
+        return int(rng.choice([53, 80, 443, 8080]))
+
+    if stage == 5:
+        return int(rng.choice([80, 443, 21, 22]))
+
+    return int(
+        rng.choice(
+            [
+                53,
+                80,
+                443,
+                22,
+                25,
+                110,
+                123,
+                3306,
+                5432,
+            ]
+        )
+    )
+
+
+# ---------------------------------------------------------------------
+# Feature generation
+# ---------------------------------------------------------------------
+
+def generate_features(
+    rng: np.random.Generator,
+    stage: int,
+    label: str,
+) -> Dict[str, float]:
+    """
+    Generate CIC-IDS-style flow and packet-level features.
+
+    Values are intentionally synthetic but stage-dependent so that
+    temporal dynamics can be learned by the demo World Model.
+    """
+
+    # -------------------------------------------------------------
+    # Normal traffic baseline
+    # -------------------------------------------------------------
+
+    if stage == 0:
+
+        duration = clipped_normal(
+            rng,
+            mean=2.5,
+            std=1.2,
+            low=0.05,
+            high=8.0,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=18,
+                std=8,
+                low=2,
+                high=60,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=9000,
+                std=4000,
+                low=500,
+                high=30000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.45, 0.65)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(rng.binomial(3, 0.25))
+        ack = int(rng.binomial(8, 0.75))
+        fin = int(rng.binomial(3, 0.35))
+        rst = int(rng.binomial(2, 0.08))
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=500,
+            std=150,
+            low=50,
+            high=1500,
+        )
+
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.15,
+            std=0.08,
+            low=0.005,
+            high=0.5,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=64,
+            std=8,
+            low=32,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=64240,
+            std=10000,
+            low=8192,
+            high=65535,
+        )
+
+    # -------------------------------------------------------------
+    # Reconnaissance
+    # -------------------------------------------------------------
+
+    elif stage == 1:
+
+        duration = clipped_normal(
+            rng,
+            mean=0.20,
+            std=0.10,
+            low=0.01,
+            high=0.8,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=5,
+                std=3,
+                low=2,
+                high=20,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=500,
+                std=250,
+                low=100,
+                high=2000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.75, 0.95)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(
+            clipped_normal(
+                rng,
+                mean=4,
+                std=2,
+                low=1,
+                high=10,
+            )
+        )
+
+        ack = int(
+            clipped_normal(
+                rng,
+                mean=1,
+                std=1,
+                low=0,
+                high=4,
+            )
+        )
+
+        fin = int(rng.binomial(2, 0.1))
+        rst = int(
+            clipped_normal(
+                rng,
+                mean=1,
+                std=1,
+                low=0,
+                high=4,
+            )
+        )
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=100,
+            std=40,
+            low=40,
+            high=300,
+        )
+
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.02,
+            std=0.01,
+            low=0.001,
+            high=0.1,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=50,
+            std=15,
+            low=20,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=32000,
+            std=9000,
+            low=4096,
+            high=65535,
+        )
+
+    # -------------------------------------------------------------
+    # Initial Access
+    # -------------------------------------------------------------
+
+    elif stage == 2:
+
+        duration = clipped_normal(
+            rng,
+            mean=3.0,
+            std=1.5,
+            low=0.1,
+            high=10,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=45,
+                std=18,
+                low=5,
+                high=120,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=25000,
+                std=12000,
+                low=1000,
+                high=90000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.55, 0.8)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(
+            clipped_normal(
+                rng,
+                mean=8,
+                std=3,
+                low=1,
+                high=20,
+            )
+        )
+
+        ack = int(
+            clipped_normal(
+                rng,
+                mean=12,
+                std=5,
+                low=1,
+                high=30,
+            )
+        )
+
+        fin = int(rng.binomial(5, 0.25))
+        rst = int(rng.binomial(4, 0.15))
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=650,
+            std=200,
+            low=100,
+            high=1500,
+        )
+
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.08,
+            std=0.04,
+            low=0.003,
+            high=0.3,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=58,
+            std=10,
+            low=20,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=48000,
+            std=9000,
+            low=8192,
+            high=65535,
+        )
+
+    # -------------------------------------------------------------
+    # Lateral Movement
+    # -------------------------------------------------------------
+
+    elif stage == 3:
+
+        duration = clipped_normal(
+            rng,
+            mean=4.5,
+            std=2,
+            low=0.2,
+            high=15,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=65,
+                std=25,
+                low=10,
+                high=160,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=45000,
+                std=20000,
+                low=2000,
+                high=150000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.50, 0.75)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(
+            clipped_normal(
+                rng,
+                mean=7,
+                std=3,
+                low=1,
+                high=20,
+            )
+        )
+
+        ack = int(
+            clipped_normal(
+                rng,
+                mean=25,
+                std=8,
+                low=5,
+                high=50,
+            )
+        )
+
+        fin = int(rng.binomial(5, 0.30))
+        rst = int(rng.binomial(5, 0.15))
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=720,
+            std=220,
+            low=100,
+            high=1500,
+        )
+
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.12,
+            std=0.05,
+            low=0.005,
+            high=0.4,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=61,
+            std=9,
+            low=20,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=52000,
+            std=8000,
+            low=8192,
+            high=65535,
+        )
+
+    # -------------------------------------------------------------
+    # Command & Control
+    # -------------------------------------------------------------
+
+    elif stage == 4:
+
+        duration = clipped_normal(
+            rng,
+            mean=8,
+            std=3,
+            low=0.5,
+            high=25,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=35,
+                std=12,
+                low=5,
+                high=100,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=18000,
+                std=7000,
+                low=1000,
+                high=60000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.40, 0.60)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(rng.binomial(3, 0.35))
+
+        ack = int(
+            clipped_normal(
+                rng,
+                mean=20,
+                std=7,
+                low=3,
+                high=50,
+            )
+        )
+
+        fin = int(rng.binomial(4, 0.20))
+        rst = int(rng.binomial(3, 0.10))
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=450,
+            std=150,
+            low=50,
+            high=1200,
+        )
+
+        # Periodic communication
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.8,
+            std=0.25,
+            low=0.1,
+            high=2.0,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=58,
+            std=10,
+            low=20,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=50000,
+            std=9000,
+            low=8192,
+            high=65535,
+        )
+
+    # -------------------------------------------------------------
+    # Exfiltration
+    # -------------------------------------------------------------
+
+    else:
+
+        duration = clipped_normal(
+            rng,
+            mean=12,
+            std=5,
+            low=1,
+            high=40,
+        )
+
+        total_packets = int(
+            clipped_normal(
+                rng,
+                mean=120,
+                std=45,
+                low=20,
+                high=300,
+            )
+        )
+
+        total_bytes = int(
+            clipped_normal(
+                rng,
+                mean=160000,
+                std=60000,
+                low=10000,
+                high=500000,
+            )
+        )
+
+        fwd_packets = max(
+            1,
+            int(total_packets * rng.uniform(0.65, 0.85)),
+        )
+
+        bwd_packets = max(
+            1,
+            total_packets - fwd_packets,
+        )
+
+        syn = int(rng.binomial(3, 0.25))
+
+        ack = int(
+            clipped_normal(
+                rng,
+                mean=65,
+                std=20,
+                low=10,
+                high=120,
+            )
+        )
+
+        fin = int(rng.binomial(8, 0.30))
+        rst = int(rng.binomial(4, 0.08))
+
+        packet_size_mean = clipped_normal(
+            rng,
+            mean=1200,
+            std=180,
+            low=300,
+            high=1500,
+        )
+
+        iat_mean = clipped_normal(
+            rng,
+            mean=0.04,
+            std=0.015,
+            low=0.002,
+            high=0.15,
+        )
+
+        ttl = clipped_normal(
+            rng,
+            mean=60,
+            std=9,
+            low=20,
+            high=128,
+        )
+
+        tcp_window = clipped_normal(
+            rng,
+            mean=60000,
+            std=5000,
+            low=8192,
+            high=65535,
+        )
+
+    # -----------------------------------------------------------------
+    # Derived values
+    # -----------------------------------------------------------------
+
+    bytes_per_packet = total_bytes / max(total_packets, 1)
+    packets_per_second = total_packets / max(duration, 0.001)
+    bytes_per_second = total_bytes / max(duration, 0.001)
+
+    fwd_bwd_packet_ratio = (
+        fwd_packets / max(bwd_packets, 1)
+    )
+
+    syn_ratio = syn / max(total_packets, 1)
+    ack_ratio = ack / max(total_packets, 1)
+    rst_ratio = rst / max(total_packets, 1)
+
+    iat_variance = max(
+        0.000001,
+        iat_mean * iat_mean * rng.uniform(0.4, 1.8),
+    )
+
+    iat_max = max(
+        iat_mean,
+        iat_mean * rng.uniform(2.0, 8.0),
+    )
+
+    # Packet-level characteristics
+    payload_mean = max(
+        0,
+        packet_size_mean * rng.uniform(0.35, 0.85),
+    )
+
+    payload_std = max(
+        1,
+        packet_size_mean * rng.uniform(0.05, 0.30),
+    )
+
+    payload_max = min(
+        1500,
+        max(
+            payload_mean,
+            packet_size_mean * rng.uniform(1.1, 1.8),
+        ),
+    )
+
+    fragment_flags = int(
+        rng.binomial(
+            2,
+            0.15 if stage in [1, 3] else 0.03,
+        )
+    )
+
+    retransmissions = int(
+        rng.poisson(
+            2.0 if stage in [1, 2, 3] else 0.7
+        )
+    )
+
+    # Attack-specific heuristic signals
+    dst_port_diversity = (
+        rng.uniform(8, 40)
+        if stage == 1
+        else rng.uniform(1, 5)
+    )
+
+    port_scan_score = (
+        rng.uniform(0.65, 1.0)
+        if stage == 1
+        else rng.uniform(0.0, 0.25)
+    )
+
+    syn_burst_score = (
+        rng.uniform(0.60, 1.0)
+        if stage == 1
+        else rng.uniform(0.0, 0.30)
+    )
+
+    connection_attempt_rate = (
+        packets_per_second
+        * rng.uniform(0.5, 1.5)
+    )
+
+    failed_connection_ratio = (
+        rng.uniform(0.35, 0.90)
+        if stage == 1
+        else rng.uniform(0.02, 0.25)
+    )
+
+    # -----------------------------------------------------------------
+    # Return CIC-IDS-style feature dictionary
+    # -----------------------------------------------------------------
+
+    return {
+        "Flow Duration": duration * 1_000_000,
+        "Total Fwd Packets": fwd_packets,
+        "Total Backward Packets": bwd_packets,
+        "Total Length of Fwd Packets": total_bytes * 0.60,
+        "Total Length of Bwd Packets": total_bytes * 0.40,
+        "Fwd Packet Length Max": packet_size_mean * 1.5,
+        "Fwd Packet Length Mean": packet_size_mean,
+        "Bwd Packet Length Max": packet_size_mean * 1.2,
+        "Bwd Packet Length Mean": packet_size_mean * 0.8,
+        "Flow Bytes/s": bytes_per_second,
+        "Flow Packets/s": packets_per_second,
+        "Flow IAT Mean": iat_mean,
+        "Flow IAT Std": np.sqrt(iat_variance),
+        "Flow IAT Max": iat_max,
+        "Fwd IAT Mean": iat_mean * rng.uniform(0.8, 1.2),
+        "Bwd IAT Mean": iat_mean * rng.uniform(0.8, 1.3),
+        "Fwd PSH Flags": int(rng.binomial(4, 0.25)),
+        "Bwd PSH Flags": int(rng.binomial(4, 0.15)),
+        "Fwd URG Flags": int(rng.binomial(2, 0.05)),
+        "Bwd URG Flags": int(rng.binomial(2, 0.03)),
+        "Fwd Header Length": int(fwd_packets * rng.uniform(20, 40)),
+        "Bwd Header Length": int(bwd_packets * rng.uniform(20, 40)),
+        "Fwd Packets/s": fwd_packets / max(duration, 0.001),
+        "Bwd Packets/s": bwd_packets / max(duration, 0.001),
+        "Min Packet Length": max(20, packet_size_mean * 0.2),
+        "Max Packet Length": payload_max,
+        "Packet Length Mean": packet_size_mean,
+        "Packet Length Std": payload_std,
+        "Packet Length Variance": payload_std ** 2,
+        "Average Packet Size": bytes_per_packet,
+        "Avg Fwd Segment Size": packet_size_mean,
+        "Avg Bwd Segment Size": packet_size_mean * 0.8,
+        "Subflow Fwd Packets": fwd_packets,
+        "Subflow Fwd Bytes": total_bytes * 0.60,
+        "Subflow Bwd Packets": bwd_packets,
+        "Subflow Bwd Bytes": total_bytes * 0.40,
+        "Init_Win_bytes_forward": tcp_window,
+        "Init_Win_bytes_backward": tcp_window * rng.uniform(0.6, 1.0),
+        "act_data_pkt_fwd": max(1, int(fwd_packets * rng.uniform(0.3, 0.9))),
+        "min_seg_size_forward": rng.uniform(20, 40),
+
+        # Explicit TCP flags
+        "SYN Flag Count": syn,
+        "ACK Flag Count": ack,
+        "FIN Flag Count": fin,
+        "RST Flag Count": rst,
+        "PSH Flag Count": int(rng.binomial(6, 0.2)),
+        "URG Flag Count": int(rng.binomial(3, 0.05)),
+
+        # Packet-level / derived telemetry
+        "TTL Mean": ttl,
+        "TCP Window Mean": tcp_window,
+        "Fragment Flag Count": fragment_flags,
+        "Payload Size Mean": payload_mean,
+        "Payload Size Std": payload_std,
+        "Payload Size Max": payload_max,
+        "Retransmission Count": retransmissions,
+
+        # Derived attack indicators
+        "bytes_per_packet": bytes_per_packet,
+        "packets_per_second": packets_per_second,
+        "bytes_per_second": bytes_per_second,
+        "fwd_bwd_packet_ratio": fwd_bwd_packet_ratio,
+        "syn_ratio": syn_ratio,
+        "ack_ratio": ack_ratio,
+        "rst_ratio": rst_ratio,
+        "syn_ack_ratio": syn / max(ack, 1),
+
+        "iat_mean": iat_mean,
+        "iat_variance": iat_variance,
+        "iat_max": iat_max,
+
+        "dst_port_diversity": dst_port_diversity,
+        "port_scan_score": port_scan_score,
+        "syn_burst_score": syn_burst_score,
+        "connection_attempt_rate": connection_attempt_rate,
+        "failed_connection_ratio": failed_connection_ratio,
+    }
+
+
+# ---------------------------------------------------------------------
+# Campaign generation
+# ---------------------------------------------------------------------
+
+def generate_campaign(
+    rng: np.random.Generator,
+    campaign_id: int,
+    records_per_stage: List[int],
+) -> List[Dict]:
+    """
+    Generate one chronological attack campaign.
+
+    Every campaign progresses:
+
+        Normal
+          ↓
+        Reconnaissance
+          ↓
+        Initial Access
+          ↓
+        Lateral Movement
+          ↓
+        Command & Control
+          ↓
+        Exfiltration
+    """
+
+    records: List[Dict] = []
+
+    # Small amount of benign traffic before the attack starts
+    warmup = max(5, records_per_stage[0])
+
+    for _ in range(warmup):
+
+        stage = 0
+        label = "BENIGN"
+
+        records.append(
+            {
+                "campaign_id": campaign_id,
+                "stage": stage,
+                "label": label,
+                "features": generate_features(
+                    rng,
+                    stage,
+                    label,
+                ),
+            }
+        )
+
+    # Attack stages
+    for stage in range(1, 6):
+
+        count = max(
+            5,
+            records_per_stage[stage],
+        )
+
+        for _ in range(count):
+
+            label = str(
+                rng.choice(
+                    STAGE_LABELS[stage]
+                )
+            )
+
+            records.append(
+                {
+                    "campaign_id": campaign_id,
+                    "stage": stage,
+                    "label": label,
+                    "features": generate_features(
+                        rng,
+                        stage,
+                        label,
+                    ),
+                }
+            )
+
+    # Recovery / cleanup period
+    cleanup_count = max(
+        5,
+        records_per_stage[0] // 2,
+    )
+
+    for _ in range(cleanup_count):
+
+        stage = 0
+        label = "BENIGN"
+
+        records.append(
+            {
+                "campaign_id": campaign_id,
+                "stage": stage,
+                "label": label,
+                "features": generate_features(
+                    rng,
+                    stage,
+                    label,
+                ),
+            }
+        )
+
+    return records
+
+
+# ---------------------------------------------------------------------
+# Main generator
+# ---------------------------------------------------------------------
 
 def generate_synthetic_traffic(
     n_records: int = 10000,
     attack_ratio: float = 0.35,
-    output_path: Optional[str] = None,
+    output_path: str | Path | None = None,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
-    Generate synthetic network traffic with progressive attack stages.
+    Generate multiple chronological attack campaigns.
 
-    The traffic is generated in chronological order:
-      - Phase 1 (0–20%):   Mostly benign
-      - Phase 2 (20–40%):  Reconnaissance activity begins
-      - Phase 3 (40–60%):  Initial Access attempts
-      - Phase 4 (60–75%):  Lateral Movement
-      - Phase 5 (75–85%):  Command & Control
-      - Phase 6 (85–100%): Exfiltration + continued benign
+    Parameters
+    ----------
+    n_records:
+        Number of traffic records.
 
-    Args:
-        n_records: Total number of flow records.
-        attack_ratio: Approximate fraction of malicious flows.
-        output_path: If provided, save CSV to this path.
-        seed: Random seed for reproducibility.
+    attack_ratio:
+        Approximate fraction of records belonging to attack stages.
 
-    Returns:
-        DataFrame with synthetic traffic.
+    output_path:
+        Optional CSV output path.
+
+    seed:
+        Random seed.
+
+    Returns
+    -------
+    pandas.DataFrame
     """
-    rng = np.random.RandomState(seed)
-    start_time = datetime(2025, 6, 15, 8, 0, 0)
 
-    records = []
-    internal_ips = [f"192.168.1.{i}" for i in range(1, 51)]
-    external_ips = [f"10.0.{rng.randint(1, 255)}.{rng.randint(1, 255)}" for _ in range(30)]
-    attacker_ip = "203.0.113.42"
-    c2_ip = "198.51.100.77"
+    if n_records < 1000:
+        raise ValueError(
+            "n_records should be at least 1000."
+        )
 
-    for i in range(n_records):
-        progress = i / n_records
-        timestamp = start_time + timedelta(seconds=i * 0.5 + rng.uniform(0, 0.3))
+    if not 0.05 <= attack_ratio <= 0.80:
+        raise ValueError(
+            "attack_ratio should be between 0.05 and 0.80."
+        )
 
-        # Determine if this flow is an attack based on phase
-        is_attack = False
-        label = "BENIGN"
-        stage = 0
+    rng = np.random.default_rng(seed)
 
-        if progress < 0.20:
-            # Phase 1: mostly benign
-            is_attack = rng.random() < 0.02
-            if is_attack:
-                label = "PortScan"
-                stage = 1
-        elif progress < 0.40:
-            # Phase 2: Reconnaissance
-            is_attack = rng.random() < 0.25
-            if is_attack:
-                label = rng.choice(["PortScan", "SSH-Patator"])
-                stage = 1
-        elif progress < 0.60:
-            # Phase 3: Initial Access
-            is_attack = rng.random() < 0.35
-            if is_attack:
-                label = rng.choice(["Web Attack – Brute Force", "Infiltration", "DoS Hulk"])
-                stage = 2
-        elif progress < 0.75:
-            # Phase 4: Lateral Movement
-            is_attack = rng.random() < 0.40
-            if is_attack:
-                label = rng.choice(["Infiltration", "Web Attack – XSS"])
-                stage = 3
-        elif progress < 0.85:
-            # Phase 5: C2
-            is_attack = rng.random() < 0.30
-            if is_attack:
-                label = "Bot"
-                stage = 4
+    random.seed(seed)
+
+    logger.info(
+        "Generating %d synthetic records "
+        "(attack_ratio=%.2f, seed=%d)",
+        n_records,
+        attack_ratio,
+        seed,
+    )
+
+    # -----------------------------------------------------------------
+    # Determine number of campaigns
+    # -----------------------------------------------------------------
+
+    # Multiple campaigns are essential for chronological evaluation.
+    n_campaigns = max(
+        5,
+        min(10, n_records // 900),
+    )
+
+    logger.info(
+        "Generating %d chronological attack campaigns.",
+        n_campaigns,
+    )
+
+    # -----------------------------------------------------------------
+    # Build campaign sizes
+    # -----------------------------------------------------------------
+
+    # Allocate approximately equal record counts to campaigns.
+    base_size = n_records // n_campaigns
+
+    campaign_sizes = [
+        base_size
+        for _ in range(n_campaigns)
+    ]
+
+    campaign_sizes[-1] += (
+        n_records - sum(campaign_sizes)
+    )
+
+    all_records: List[Dict] = []
+
+    # -----------------------------------------------------------------
+    # Generate campaigns
+    # -----------------------------------------------------------------
+
+    for campaign_id, campaign_size in enumerate(
+        campaign_sizes,
+        start=1,
+    ):
+
+        # Approximate stage proportions within each campaign.
+        #
+        # The first value is benign warmup.
+        # Remaining stages form the attack progression.
+
+        benign_before = int(
+            campaign_size * 0.12
+        )
+
+        recon = int(
+            campaign_size * attack_ratio * 0.18
+        )
+
+        initial_access = int(
+            campaign_size * attack_ratio * 0.20
+        )
+
+        lateral = int(
+            campaign_size * attack_ratio * 0.20
+        )
+
+        c2 = int(
+            campaign_size * attack_ratio * 0.18
+        )
+
+        exfil = int(
+            campaign_size * attack_ratio * 0.24
+        )
+
+        allocated = (
+            benign_before
+            + recon
+            + initial_access
+            + lateral
+            + c2
+            + exfil
+        )
+
+        # Remaining records become benign traffic.
+        remaining = max(
+            0,
+            campaign_size - allocated,
+        )
+
+        # Divide remaining benign traffic between
+        # pre-attack and post-attack periods.
+        benign_before += remaining // 2
+
+        benign_after = (
+            remaining
+            - remaining // 2
+        )
+
+        # The campaign generator uses the first value as
+        # warmup and automatically creates a cleanup section.
+        #
+        # Therefore compensate slightly for cleanup.
+        stage_counts = [
+            max(
+                5,
+                benign_before,
+            ),
+            max(5, recon),
+            max(5, initial_access),
+            max(5, lateral),
+            max(5, c2),
+            max(5, exfil),
+        ]
+
+        campaign_records = generate_campaign(
+            rng=rng,
+            campaign_id=campaign_id,
+            records_per_stage=stage_counts,
+        )
+
+        # Add additional benign traffic after the campaign.
+        for _ in range(benign_after):
+
+            campaign_records.append(
+                {
+                    "campaign_id": campaign_id,
+                    "stage": 0,
+                    "label": "BENIGN",
+                    "features": generate_features(
+                        rng,
+                        0,
+                        "BENIGN",
+                    ),
+                }
+            )
+
+        all_records.extend(
+            campaign_records
+        )
+
+    # -----------------------------------------------------------------
+    # Trim / expand exactly to requested size
+    # -----------------------------------------------------------------
+
+    if len(all_records) > n_records:
+
+        all_records = all_records[:n_records]
+
+    elif len(all_records) < n_records:
+
+        missing = n_records - len(all_records)
+
+        last_campaign = n_campaigns
+
+        for _ in range(missing):
+
+            all_records.append(
+                {
+                    "campaign_id": last_campaign,
+                    "stage": 0,
+                    "label": "BENIGN",
+                    "features": generate_features(
+                        rng,
+                        0,
+                        "BENIGN",
+                    ),
+                }
+            )
+
+    # -----------------------------------------------------------------
+    # Convert to rows
+    # -----------------------------------------------------------------
+
+    start_time = pd.Timestamp(
+        "2025-06-15 08:00:00"
+    )
+
+    rows: List[Dict] = []
+
+    for i, record in enumerate(
+        all_records
+    ):
+
+        stage = int(
+            record["stage"]
+        )
+
+        label = record["label"]
+
+        is_attack = int(
+            stage > 0
+        )
+
+        # Small random interval between flows.
+        # Keeps timestamps strictly chronological.
+        timestamp = (
+            start_time
+            + pd.Timedelta(
+                milliseconds=(
+                    i * 500
+                    + rng.integers(
+                        0,
+                        250,
+                    )
+                )
+            )
+        )
+
+        # Synthetic endpoints.
+        if stage == 0:
+
+            src_ip = random_ip(
+                rng,
+                internal=True,
+            )
+
+            dst_ip = random_ip(
+                rng,
+                internal=False,
+            )
+
         else:
-            # Phase 6: Exfiltration
-            is_attack = rng.random() < 0.20
-            if is_attack:
-                label = "Bot"
-                stage = 5
 
-        # Generate flow features based on attack type
-        if is_attack:
-            src_ip = attacker_ip if stage <= 2 else rng.choice(internal_ips)
-            dst_ip = rng.choice(internal_ips) if stage >= 3 else rng.choice(internal_ips)
+            src_ip = random_ip(
+                rng,
+                internal=False,
+            )
 
-            if stage == 1:  # Recon
-                dst_port = rng.randint(1, 65535)
-                src_port = rng.randint(40000, 65535)
-                protocol = 6  # TCP
-                total_fwd_packets = rng.randint(1, 5)
-                total_bwd_packets = rng.randint(0, 2)
-                fwd_length = rng.randint(40, 200)
-                bwd_length = rng.randint(0, 100)
-                flow_duration = rng.randint(100, 5000)
-                syn_count = rng.randint(1, 10)
-                ack_count = rng.randint(0, 3)
-                rst_count = rng.randint(0, 5)
-                fin_count = 0
-                psh_count = 0
-                urg_count = 0
-            elif stage == 2:  # Initial Access
-                dst_port = rng.choice([22, 80, 443, 8080, 3389])
-                src_port = rng.randint(40000, 65535)
-                protocol = 6
-                total_fwd_packets = rng.randint(10, 100)
-                total_bwd_packets = rng.randint(5, 50)
-                fwd_length = rng.randint(500, 5000)
-                bwd_length = rng.randint(200, 3000)
-                flow_duration = rng.randint(10000, 100000)
-                syn_count = rng.randint(5, 20)
-                ack_count = rng.randint(10, 50)
-                rst_count = rng.randint(2, 15)
-                fin_count = rng.randint(0, 3)
-                psh_count = rng.randint(5, 30)
-                urg_count = 0
-            elif stage == 3:  # Lateral
-                dst_ip = rng.choice(internal_ips)
-                dst_port = rng.choice([135, 139, 445, 3389, 5985])
-                src_port = rng.randint(40000, 65535)
-                protocol = 6
-                total_fwd_packets = rng.randint(20, 200)
-                total_bwd_packets = rng.randint(15, 150)
-                fwd_length = rng.randint(1000, 10000)
-                bwd_length = rng.randint(500, 8000)
-                flow_duration = rng.randint(50000, 500000)
-                syn_count = rng.randint(3, 10)
-                ack_count = rng.randint(20, 80)
-                rst_count = rng.randint(0, 5)
-                fin_count = rng.randint(1, 5)
-                psh_count = rng.randint(10, 50)
-                urg_count = 0
-            elif stage == 4:  # C2
-                dst_ip = c2_ip
-                dst_port = rng.choice([443, 8443, 4444, 53])
-                src_port = rng.randint(40000, 65535)
-                protocol = rng.choice([6, 17])  # TCP or UDP
-                total_fwd_packets = rng.randint(5, 30)
-                total_bwd_packets = rng.randint(5, 30)
-                fwd_length = rng.randint(200, 2000)
-                bwd_length = rng.randint(200, 2000)
-                flow_duration = rng.randint(100000, 1000000)
-                syn_count = rng.randint(1, 3)
-                ack_count = rng.randint(10, 30)
-                rst_count = 0
-                fin_count = rng.randint(0, 2)
-                psh_count = rng.randint(5, 20)
-                urg_count = 0
-            else:  # Exfiltration
-                dst_ip = c2_ip
-                dst_port = rng.choice([443, 8443, 21, 22])
-                src_port = rng.randint(40000, 65535)
-                protocol = 6
-                total_fwd_packets = rng.randint(50, 500)
-                total_bwd_packets = rng.randint(10, 50)
-                fwd_length = rng.randint(10000, 500000)
-                bwd_length = rng.randint(500, 5000)
-                flow_duration = rng.randint(200000, 2000000)
-                syn_count = rng.randint(1, 3)
-                ack_count = rng.randint(30, 100)
-                rst_count = 0
-                fin_count = rng.randint(1, 5)
-                psh_count = rng.randint(20, 80)
-                urg_count = 0
-        else:
-            # Benign traffic
-            src_ip = rng.choice(internal_ips)
-            dst_ip = rng.choice(external_ips + internal_ips)
-            dst_port = rng.choice([80, 443, 53, 8080, 993, 587, 25, 110])
-            src_port = rng.randint(1024, 65535)
-            protocol = rng.choice([6, 17])
-            total_fwd_packets = rng.randint(1, 50)
-            total_bwd_packets = rng.randint(1, 50)
-            fwd_length = rng.randint(100, 10000)
-            bwd_length = rng.randint(100, 50000)
-            flow_duration = rng.randint(1000, 500000)
-            syn_count = rng.randint(0, 2)
-            ack_count = rng.randint(1, 20)
-            rst_count = rng.randint(0, 1)
-            fin_count = rng.randint(0, 2)
-            psh_count = rng.randint(0, 15)
-            urg_count = 0
+            dst_ip = random_ip(
+                rng,
+                internal=True,
+            )
 
-        # IAT features
-        iat_mean = rng.uniform(10, 100000) if not is_attack else rng.uniform(1, 10000)
-        iat_std = iat_mean * rng.uniform(0.1, 2.0)
+        dst_port = choose_port(
+            rng,
+            stage,
+        )
 
-        total_pkts = total_fwd_packets + total_bwd_packets
-        total_bytes = fwd_length + bwd_length
+        protocol = choose_protocol(
+            rng,
+            stage,
+        )
 
-        records.append({
-            "Timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
-            "Src IP": src_ip,
-            "Dst IP": dst_ip,
-            "Src Port": src_port,
-            "Dst Port": dst_port,
-            "Protocol": protocol,
-            "Total Fwd Packet": total_fwd_packets,
-            "Total Bwd packets": total_bwd_packets,
-            "Total Length of Fwd Packet": fwd_length,
-            "Total Length of Bwd Packet": bwd_length,
-            "Flow Duration": flow_duration,
-            "Flow Bytes/s": total_bytes / max(flow_duration / 1e6, 1e-6),
-            "Flow Packets/s": total_pkts / max(flow_duration / 1e6, 1e-6),
-            "Fwd IAT Mean": iat_mean,
-            "Bwd IAT Mean": iat_mean * rng.uniform(0.8, 1.2),
-            "Fwd IAT Std": iat_std,
-            "Bwd IAT Std": iat_std * rng.uniform(0.5, 1.5),
-            "SYN Flag Count": syn_count,
-            "ACK Flag Count": ack_count,
-            "FIN Flag Count": fin_count,
-            "RST Flag Count": rst_count,
-            "PSH Flag Count": psh_count,
-            "URG Flag Count": urg_count,
-            "Label": label,
-        })
+        row = {
+            "timestamp": timestamp,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "dst_port": dst_port,
+            "protocol": protocol,
+        }
 
-    df = pd.DataFrame(records)
+        row.update(
+            record["features"]
+        )
 
-    if output_path:
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        df.to_csv(output_path, index=False)
-        print(f"[OK] Synthetic data saved: {output_path}")
-        print(f"    Records: {len(df)}")
-        print(f"    Label distribution:")
-        print(df["Label"].value_counts().to_string(header=False))
+        # Labels required by the project.
+        row["Label"] = label
+        row["attack_stage"] = stage
+        row["is_attack"] = is_attack
+
+        # Campaign information is useful for debugging and analysis.
+        row["campaign_id"] = int(
+            record["campaign_id"]
+        )
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    # -----------------------------------------------------------------
+    # Final sorting
+    # -----------------------------------------------------------------
+
+    df = df.sort_values(
+        "timestamp"
+    ).reset_index(
+        drop=True
+    )
+
+    # -----------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------
+
+    assert len(df) == n_records
+
+    assert df["timestamp"].is_monotonic_increasing
+
+    assert set(
+        df["attack_stage"].unique()
+    ).issubset(
+        {0, 1, 2, 3, 4, 5}
+    )
+
+    # Verify stage/binary consistency.
+    expected_attack = (
+        df["attack_stage"] > 0
+    ).astype(int)
+
+    if not np.array_equal(
+        expected_attack.values,
+        df["is_attack"].values,
+    ):
+        raise RuntimeError(
+            "attack_stage and is_attack are inconsistent."
+        )
+
+    # -----------------------------------------------------------------
+    # Logging
+    # -----------------------------------------------------------------
+
+    logger.info(
+        "Synthetic dataset generated successfully."
+    )
+
+    logger.info(
+        "Records: %d",
+        len(df),
+    )
+
+    logger.info(
+        "Campaigns: %d",
+        df["campaign_id"].nunique(),
+    )
+
+    logger.info(
+        "Time range: %s → %s",
+        df["timestamp"].min(),
+        df["timestamp"].max(),
+    )
+
+    logger.info(
+        "Attack percentage: %.2f%%",
+        df["is_attack"].mean() * 100,
+    )
+
+    logger.info(
+        "Label distribution:"
+    )
+
+    for label, count in (
+        df["Label"]
+        .value_counts()
+        .items()
+    ):
+        logger.info(
+            "  %-30s %d",
+            label,
+            count,
+        )
+
+    logger.info(
+        "Stage distribution:"
+    )
+
+    for stage in range(6):
+
+        count = int(
+            (
+                df["attack_stage"]
+                == stage
+            ).sum()
+        )
+
+        percentage = (
+            count
+            / len(df)
+            * 100
+        )
+
+        logger.info(
+            "  Stage %d (%s): %d (%.2f%%)",
+            stage,
+            STAGE_NAMES[stage],
+            count,
+            percentage,
+        )
+
+    logger.info(
+        "Campaign distribution:"
+    )
+
+    for campaign_id, count in (
+        df["campaign_id"]
+        .value_counts()
+        .sort_index()
+        .items()
+    ):
+        logger.info(
+            "  Campaign %d: %d records",
+            campaign_id,
+            count,
+        )
+
+    # -----------------------------------------------------------------
+    # Save
+    # -----------------------------------------------------------------
+
+    if output_path is not None:
+
+        output_path = Path(
+            output_path
+        )
+
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        df.to_csv(
+            output_path,
+            index=False,
+        )
+
+        logger.info(
+            "Saved synthetic dataset to: %s",
+            output_path.resolve(),
+        )
 
     return df
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate synthetic network traffic")
-    parser.add_argument("--records", type=int, default=10000, help="Number of records")
-    parser.add_argument(
-        "--output", type=str, default="data/sample/synthetic_traffic.csv",
-        help="Output CSV path",
+# ---------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------
+
+def main() -> None:
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate chronological synthetic "
+            "network traffic for the World Model."
+        )
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
+    parser.add_argument(
+        "--records",
+        type=int,
+        default=10000,
+        help=(
+            "Number of records to generate "
+            "(default: 10000)"
+        ),
+    )
+
+    parser.add_argument(
+        "--attack-ratio",
+        type=float,
+        default=0.35,
+        help=(
+            "Approximate attack ratio "
+            "(default: 0.35)"
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=(
+            "data/sample/"
+            "synthetic_traffic.csv"
+        ),
+        help=(
+            "Output CSV path."
+        ),
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Random seed "
+            "(default: 42)"
+        ),
+    )
+
     args = parser.parse_args()
 
     generate_synthetic_traffic(
         n_records=args.records,
+        attack_ratio=args.attack_ratio,
         output_path=args.output,
         seed=args.seed,
     )
+
+
+if __name__ == "__main__":
+    main()
